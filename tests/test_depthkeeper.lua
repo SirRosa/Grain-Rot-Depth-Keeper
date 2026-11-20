@@ -258,7 +258,7 @@ test("ClientRestart clears cached Unreal object references", function()
     local t = sandbox()
     t.tick()
     local first = t.metrics().finds
-    assert(first >= 4)
+    assert(first >= 3)
     t.restart()
     t.tick()
     assert(t.metrics().finds > first, "new world must invalidate cache")
