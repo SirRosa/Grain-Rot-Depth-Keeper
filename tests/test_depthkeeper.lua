@@ -8,6 +8,7 @@ end
 
 local function sandbox()
     local now, logs, files, hooks = 0, {}, {}, {}
+    local counts = {calls = 0, clocks = 0, finds = 0}
     local gm = actor()
     local save = actor({
         MetaData = {GameSlot = 0}, DungeonLevel = 0, TimePlayed = 1,
@@ -43,11 +44,11 @@ local function sandbox()
         error("unexpected mode: " .. tostring(mode))
     end}
     local env = setmetatable({
-        os = {clock = function() return now end,
+        os = {clock = function() counts.clocks = counts.clocks + 1; return now end,
               getenv = function() return "C:\\Users\\Tester\\AppData\\Local" end},
         io = io_mock,
         print = function(msg) logs[#logs+1] = msg end,
-        FindFirstOf = function(name) return objects[name] end,
+        FindFirstOf = function(name) counts.finds = counts.finds + 1; return objects[name] end,
         RegisterHook = function(name, callback) hooks[name] = callback end,
     }, {__index = _G})
     assert(loadfile(main, "t", env))()
@@ -57,7 +58,20 @@ local function sandbox()
         save = save, game = gs, instance = gi, dungeon = dungeon,
         display = display, machine = machine, elevator = elevator,
         objects = objects, logs = logs, files = files,
-        tick = function(dt) now = now + (dt or 0.4); hooks[anim]() end,
+        tick = function(dt)
+            now = now + (dt or 0.6)
+            for _ = 1, 8 do counts.calls = counts.calls + 1; hooks[anim]() end
+        end,
+        spam = function(hookCalls, elapsed)
+            now = now + (elapsed or 0)
+            for _ = 1, hookCalls do counts.calls = counts.calls + 1; hooks[anim]() end
+        end,
+        metrics = function() return {calls = counts.calls, clocks = counts.clocks, finds = counts.finds} end,
+        restart = function()
+            local cb = hooks["/Script/Engine.PlayerController:ClientRestart"]
+            assert(cb, "ClientRestart hook missing")
+            cb()
+        end,
         createSave = function(slot, level, time, win, fail, key)
             local s = actor({MetaData = {GameSlot = slot}, DungeonLevel = level,
                 TimePlayed = time, DungeonWins = win, DungeonFails = fail,
@@ -223,6 +237,31 @@ test("game can reset depth again after end screen and keeper re-restores it", fu
     t.save.DungeonLevel = 0
     t.tick()
     assert(t.save.DungeonLevel == 4)
+end)
+
+test("animation storm: clock sampled once per eight callbacks and cached lookups", function()
+    local t = sandbox()
+    t.game.CurrentDungeonRun.State = 2
+    t.save.DungeonLevel = 4
+    t.dungeon.CurrentSeed.Level = 3
+    t.tick()
+    local before = t.metrics()
+    t.spam(1600, 5)
+    local after = t.metrics()
+    assert(after.calls - before.calls == 1600)
+    assert(after.clocks - before.clocks <= 205, "unnecessary per-animation clock calls")
+    assert(after.finds == before.finds, "registry lookups should stay cached")
+    assert(t.save.DungeonLevel == 4)
+end)
+
+test("ClientRestart clears cached Unreal object references", function()
+    local t = sandbox()
+    t.tick()
+    local first = t.metrics().finds
+    assert(first >= 4)
+    t.restart()
+    t.tick()
+    assert(t.metrics().finds > first, "new world must invalidate cache")
 end)
 
 print(string.format("ALL TESTS PASSED (%d)", count))
