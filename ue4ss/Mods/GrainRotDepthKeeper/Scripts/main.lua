@@ -1,4 +1,4 @@
--- Grain Rot Depth Keeper v0.1.0
+-- Grain Rot Depth Keeper v0.2.0
 -- Host-only UE4SS Lua mod. Requires a compatible Grain Rot UE4SS installation.
 --
 -- Observed schema (supplied Helden 5.7.4 .usmap):
@@ -22,6 +22,7 @@ local CONFIG = {
     -- Avoid importing progress from a new game reusing an older save slot.
     PLAYTIME_GRACE_SECONDS = 5,
     VERBOSE = false,
+    DISPLAY_PROBE_SECONDS = 3, -- only outpost; throttled instance lookup
 }
 
 local TAG = "[GrainRotDepthKeeper] "
@@ -129,6 +130,10 @@ local state = {
     lastBackupTime = -1,
     applied = 0,
     warned = false,
+    displayOffset = nil,
+    nextDisplayProbe = 0,
+    lastDisplaySnapshot = nil,
+    seedWarningIssued = false,
 }
 
 local function reset_for_save(save, saveKey, slot, playtime, wins, fails)
@@ -144,12 +149,72 @@ local function reset_for_save(save, saveKey, slot, playtime, wins, fails)
     state.lastBackupDepth = nil
     state.lastBackupTime = -1
     state.applied = 0
+    state.displayOffset = nil
+    state.nextDisplayProbe = 0
+    state.lastDisplaySnapshot = nil
+    state.seedWarningIssued = false
     local fromBackup = read_backup(slot, playtime, wins, fails)
     if fromBackup and fromBackup > state.protected then
         state.protected = fromBackup
         log("slot " .. slot .. ": recovered depth " .. fromBackup .. " from backup")
     else
         log("slot " .. slot .. ": tracking saved depth " .. state.protected)
+    end
+end
+
+-- The shipped .usmap shows AHeldenDungeonLevelDisplay.DisplayLevel as
+-- a second, independent field. We cannot assume it drives generation; patch
+-- only this known display field, NEVER the dungeon seed or elevator movement.
+-- Observing the display before failure calibrates 0/1-based semantics.
+-- The machine has no reflected 'CurrentFloor' property in this build.
+local function probe_display(raw, runState)
+    if runState ~= 0 or state.protected <= 0 then return end
+    local now = os.clock()
+    if now < state.nextDisplayProbe then return end
+    state.nextDisplayProbe = now + CONFIG.DISPLAY_PROBE_SECONDS
+
+    local display, machine, elevator
+    pcall(function() display = FindFirstOf("HeldenDungeonLevelDisplay") end)
+    pcall(function() machine = FindFirstOf("HeldenElevatorMachine") end)
+    pcall(function() elevator = FindFirstOf("HeldenDungeonElevator") end)
+    local shown = valid(display) and read_number(display, "DisplayLevel", 0, CONFIG.MAX_DEPTH) or nil
+    if shown and not state.failureSeen and (shown == raw or shown == raw + 1) then
+        state.displayOffset = shown - raw
+    end
+    local machineName = "none"
+    if valid(machine) then
+        pcall(function() machineName = tostring(machine.TargetDungeonName) end)
+    end
+    local elevatorCurrent
+    if valid(elevator) then
+        elevatorCurrent = read_number(elevator, "CurrentStationIdx", 0, 100)
+    end
+    local snapshot = string.format("outpost: save=%d kept=%d display=%s offset=%s machine=%s station=%s fail=%s",
+        raw, state.protected, tostring(shown), tostring(state.displayOffset),
+        machineName, tostring(elevatorCurrent), tostring(state.failureSeen))
+    if snapshot ~= state.lastDisplaySnapshot then
+        state.lastDisplaySnapshot = snapshot
+        log(snapshot)
+    end
+
+    -- Refresh the concrete in-world level display, which may have been
+    -- initialized with level 1 before the SaveGame field was restored.
+    -- Only repair low/stale displays after a confirmed failed run.
+    -- This cannot guarantee that the machine uses DisplayLevel internally.
+    if state.failureSeen and shown and shown < state.protected then
+        local target = state.protected + (state.displayOffset or 1)
+        if target > shown and target <= CONFIG.MAX_DEPTH then
+            local ok, err = pcall(function() display.DisplayLevel = target end)
+            if ok then
+                local readback = read_number(display, "DisplayLevel", 0, CONFIG.MAX_DEPTH)
+                log(string.format("display refresh: %d -> %d, readback=%s",
+                    shown, target, tostring(readback)))
+                -- Don't repeatedly hammer the object if the setter sticks.
+                state.nextDisplayProbe = now + CONFIG.DISPLAY_PROBE_SECONDS
+            else
+                log("display refresh failed: " .. tostring(err))
+            end
+        end
     end
 end
 
@@ -215,6 +280,7 @@ local function scan()
         if state.failureSeen then
             log("next dungeon run started; failure recovery completed")
             state.failureSeen = false
+            state.seedWarningIssued = false
         end
         if seedLevel then
             if not state.highestSeed or seedLevel > state.highestSeed then
@@ -249,11 +315,12 @@ local function scan()
             log("failed dungeon run observed; preserving depth " .. state.protected)
         end
     end
-    -- Restore at the outpost (State=None), after end-of-run cleanup has reset
-    -- the game's field. Repeated ticks handle a late reset; no travel/teleport.
-    -- File backup can recover a previous death across a full game restart.
-    local inOutpost = (runState == 0)
-    if inOutpost and raw < state.protected and (state.failureSeen or not state.runSeen) then
+    -- Restore as soon as the game resets depth during the end screen,
+    -- rather than waiting until the outpost UI has already cached level 1.
+    -- The outpost fallback also recovers depth after loading an older backup.
+    local canRestore = (state.failureSeen and (runState == 3 or runState == 0))
+        or (runState == 0 and not state.runSeen)
+    if canRestore and raw < state.protected then
         local success, err = pcall(function() save.DungeonLevel = state.protected end)
         if success then
             state.applied = state.applied + 1
@@ -263,6 +330,21 @@ local function scan()
             log("depth restore FAILED: " .. tostring(err))
         end
     end
+
+    if state.lastRunState ~= runState then
+        log(string.format("run state %s -> %s; save=%d kept=%d seed=%s failed=%s",
+            tostring(state.lastRunState), tostring(runState), raw, state.protected,
+            tostring(seedLevel), tostring(state.failureSeen)))
+    end
+    -- Detect whether a restored level is actually used for the new map.
+    -- A mismatch is logged, NOT forcibly patched into a generated map.
+    if runState == 2 and seedLevel and
+       seedLevel + 1 < state.protected and not state.seedWarningIssued then
+        state.seedWarningIssued = true
+        log(string.format("WARNING: generated dungeon seed level=%d, saved target=%d; next run may be shallow",
+            seedLevel, state.protected))
+    end
+    probe_display(raw, runState)
 
     if state.protected > 0 and playtime and wins and fails and
        (state.lastBackupDepth ~= state.protected or
@@ -316,4 +398,4 @@ pcall(function()
         ensure_hook()
     end)
 end)
-log("loaded v0.1.0 (save-level restoration; per-slot backup)")
+log("loaded v0.2.0 (early restoration; outpost display refresh + runtime diagnostics)")
