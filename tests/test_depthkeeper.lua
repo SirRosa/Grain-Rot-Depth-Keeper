@@ -17,10 +17,16 @@ local function sandbox()
     local gi = actor({CurrentSaveGame = save})
     local dungeon = actor({CurrentSeed = {Level = 0, Seed = 1122}})
     local gs = actor({CurrentDungeonRun = {State = 0, Flags = 0, DungeonActor = dungeon}})
+    local display = actor({DisplayLevel = 1})
+    local machine = actor({TargetDungeonName = "Dungeon"})
+    local elevator = actor({CurrentStationIdx = 0})
     local objects = {
         GameModeBase = gm,
         HeldenGameInstance = gi,
         HeldenGameState = gs,
+        HeldenDungeonLevelDisplay = display,
+        HeldenElevatorMachine = machine,
+        HeldenDungeonElevator = elevator,
     }
     local io_mock = {open = function(path, mode)
         if mode == "r" then
@@ -49,6 +55,7 @@ local function sandbox()
     assert(hooks[anim], "heartbeat hook missing")
     return {
         save = save, game = gs, instance = gi, dungeon = dungeon,
+        display = display, machine = machine, elevator = elevator,
         objects = objects, logs = logs, files = files,
         tick = function(dt) now = now + (dt or 0.4); hooks[anim]() end,
         createSave = function(slot, level, time, win, fail, key)
@@ -84,7 +91,7 @@ test("defeat on displayed floor 15 restores exact raw save depth 15", function()
     t.save.DungeonLevel = 0
     t.save.DungeonFails = 1
     t.tick()
-    assert(t.save.DungeonLevel == 0, "must not alter save inside end screen")
+    assert(t.save.DungeonLevel == 15, "early restore should happen during end screen")
     t.game.CurrentDungeonRun.State = 0
     t.tick()
     assert(t.save.DungeonLevel == 15, "should restore saved depth on return")
@@ -107,6 +114,7 @@ test("false deaths, successful exits and normal resets are ignored", function()
     t.game.CurrentDungeonRun.State = 0
     t.tick()
     assert(t.save.DungeonLevel == 0, "no restore when run did not fail")
+    assert(t.display.DisplayLevel == 1, "successful run must leave display untouched")
 end)
 
 test("raw save depth zero uses highest observed seed as fallback", function()
@@ -177,6 +185,44 @@ test("new game reusing a slot rejects older backup if playtime rewinds", functio
     local other = t.createSave(0, 0, 1, 0, 0, "NewGameSameSlot")
     t.tick()
     assert(other.DungeonLevel == 0, "old game depth must not pollute new game")
+end)
+
+
+test("failed run refreshes stale cached outpost display without relaunch", function()
+    local t = sandbox()
+    t.save.DungeonLevel = 2
+    t.display.DisplayLevel = 3
+    t.tick()
+    t.game.CurrentDungeonRun.State = 2
+    t.dungeon.CurrentSeed.Level = 2
+    t.tick()
+    t.game.CurrentDungeonRun.State = 3
+    t.game.CurrentDungeonRun.Flags = 1
+    t.save.DungeonLevel = 0
+    t.tick()
+    assert(t.save.DungeonLevel == 2)
+    t.game.CurrentDungeonRun.State = 0
+    t.display.DisplayLevel = 1
+    t.tick(3.5)
+    assert(t.display.DisplayLevel == 3, "UI field should refresh to prior floor")
+end)
+
+test("game can reset depth again after end screen and keeper re-restores it", function()
+    local t = sandbox()
+    t.save.DungeonLevel = 4
+    t.tick()
+    t.game.CurrentDungeonRun.State = 2
+    t.dungeon.CurrentSeed.Level = 3
+    t.tick()
+    t.game.CurrentDungeonRun.State = 3
+    t.game.CurrentDungeonRun.Flags = 1
+    t.save.DungeonLevel = 0
+    t.tick()
+    assert(t.save.DungeonLevel == 4)
+    t.game.CurrentDungeonRun.State = 0
+    t.save.DungeonLevel = 0
+    t.tick()
+    assert(t.save.DungeonLevel == 4)
 end)
 
 print(string.format("ALL TESTS PASSED (%d)", count))
