@@ -2,7 +2,7 @@
 
 Mod UE4SS dla Grain Rot: zachowuje głębokość po nieudanej wyprawie, aby następny zjazd windą nie zaczynał się od piętra pierwszego.
 
-**Status: v0.2.0, wersja testowa (działanie w grze niepotwierdzone).** Kod oparty na polach z dostarczonego `.usmap` (Helden, UE 5.7.4), bez testu wewnątrz gry.
+**Status: v0.3.0, optymalizacja wydajności (weryfikacja FPS w grze oczekuje na test).** Użytkownik potwierdził działanie przywracania głębokości w v0.2.0: po śmierci winda nadal wyświetlała poziom 3.
 
 ## Instalacja
 1. Zainstaluj działającą wersję UE4SS dla Grain Rot.
@@ -15,7 +15,7 @@ Mod UE4SS dla Grain Rot: zachowuje głębokość po nieudanej wyprawie, aby nast
 - Przywrócenie po fladze zakończonej porażką już na ekranie końca wyprawy i ponownie po powrocie do bazy, jeśli gra wyzeruje postęp później.
 - Lokalna kopia per slot: `%LOCALAPPDATA%\Helden\Saved\GrainRotDepthKeeper_slotN.txt`.
 - Odświeżenie `HeldenDungeonLevelDisplay.DisplayLevel` po śmierci (jeśli instancja jest dostępna; nie ma jeszcze potwierdzenia, że jest to wyświetlacz maszyny windy).
-- Diagnostyka `DungeonLevel`, `CurrentSeed.Level`, stanu wyprawy oraz obiektów windy po powrocie do bazy.
+- Diagnostyka `DungeonLevel`, `CurrentSeed.Level` i stanu wyprawy po powrocie do bazy.
 - Brak teleportacji, przywracania ekwipunku czy ingerencji w mapę.
 - Logi: `UE4SS.log`, prefiks `[GrainRotDepthKeeper]`.
 
@@ -23,12 +23,24 @@ Mod UE4SS dla Grain Rot: zachowuje głębokość po nieudanej wyprawie, aby nast
 
 **Wciąż niezweryfikowane:** czy `HeldenDungeonLevelDisplay` jest właściwym wyświetlaczem windy oraz czy nowy run startuje na poziomie wskazywanym przez ekran. Bez kolejnego logu z v0.2 nie można obiecać pełnej naprawy. Testy CI symulują API, nie uruchamiają Grain Rot.
 
-## Test po instalacji v0.2
-1. Uruchom grę z modem; sprawdź, na jakim piętrze jest winda.
-2. Przejdź piętro, doprowadź do **porażki całej wyprawy** i wróć do windy **bez restartu gry**.
-3. Sprawdź numer w windzie; jeśli nadal jest błędny, nie schodź na kolejne piętro. Zakończ grę i wyślij `ue4ss/UE4SS.log` z liniami `[GrainRotDepthKeeper]`.
-4. Wpisy `outpost`, `display refresh`, `run state`, `WARNING` wskażą, czy blokuje nas wyświetlacz, czy generator.
+## Optymalizacja v0.3.0
+- Hook animacji jest nadal wymagany w obecnym buildzie gry, ale siedem na osiem wywołań od razu kończy się bez odczytu czasu i obiektów UE.
+- Odpytywanie stanu gry: co 0,5 s (wcześniej co 0,2 s).
+- Pamięć podręczna `GameModeBase`, `HeldenGameInstance`, `HeldenGameState` i wyświetlacza; czyszczenie przy `ClientRestart`, przy przejściu do kolejnej wyprawy i po unieważnieniu UObject.
+- Usunięto niepotrzebne odczyty obiektów maszyny windy przy każdym sprawdzeniu ekranu.
+- `enabled.txt` i ścieżka instalacji pozostają bez zmian.
 
-Zaleca się kopię zapisu przed testem.
+**Ważne:** źródłem obciążenia może być samo wywołanie callbacku UE4SS na każdym cyklu animacji. Ograniczenie pracy callbacku nie eliminuje tego kosztu. GitHub Actions mierzy liczbę operacji w symulacji i sprawdza regresje, **nie FPS gry**.
 
-Kod źródłowy zawiera komentarze dotyczące znanych ograniczeń.
+## Sugerowany test porównawczy FPS
+1. Na tym samym zapisie i w identycznym miejscu zmierz FPS przez 60 sekund z v0.2.0.
+2. Zastąp tylko folder `GrainRotDepthKeeper` wersją v0.3.0, uruchom grę ponownie i powtórz pomiar w tym samym miejscu.
+3. Zmierz średnie i 1% low (np. przez CapFrameX albo RTSS), porównuj przy tych samych ustawieniach.
+4. Sprawdź odtworzenie piętra po śmierci bez restartowania gry; jeśli pojawi się regresja, prześlij nowy `UE4SS.log`.
+
+## Historia
+- v0.1.0: pierwsza próba zachowania głębokości.
+- v0.2.0: przywracanie już na ekranie porażki + odświeżenie wyświetlacza (potwierdzone działanie u użytkownika).
+- v0.3.0: odciążenie hooka i cache odczytów UE4SS, bez zmian reguł przywracania postępu.
+
+Zaleca się kopię zapisu przed instalacją nowej wersji.
