@@ -24,11 +24,11 @@ jobs:
       - name: Package mod
         run: |
           mkdir -p out
-          zip -r out/GrainRotDepthKeeper-v0.2.0.zip ue4ss/Mods/GrainRotDepthKeeper
-          unzip -t out/GrainRotDepthKeeper-v0.2.0.zip
+          zip -r out/GrainRotDepthKeeper-v0.3.0.zip ue4ss/Mods/GrainRotDepthKeeper
+          unzip -t out/GrainRotDepthKeeper-v0.3.0.zip
       - name: Upload installation ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: GrainRotDepthKeeper-v0.2.0
-          path: out/GrainRotDepthKeeper-v0.2.0.zip
+          name: GrainRotDepthKeeper-v0.3.0
+          path: out/GrainRotDepthKeeper-v0.3.0.zip
           if-no-files-found: error
