@@ -1,4 +1,4 @@
--- Grain Rot Depth Keeper v0.2.0
+-- Grain Rot Depth Keeper v0.3.0
 -- Host-only UE4SS Lua mod. Requires a compatible Grain Rot UE4SS installation.
 --
 -- Observed schema (supplied Helden 5.7.4 .usmap):
@@ -12,7 +12,8 @@
 -- The exact update order of the game's autosave is NOT verified in live play.
 
 local CONFIG = {
-    POLL_SECONDS = 0.20,
+    POLL_SECONDS = 0.50, -- depth state is not frame-sensitive
+    CLOCK_SAMPLE_EVERY = 8, -- avoid wall-clock calls on most animation updates
     MAX_DEPTH = 10000,
     -- Fallback only if the game's save level does not advance with the dungeon.
     -- 0 means CurrentSeed.Level is represented directly in save.DungeonLevel;
@@ -22,7 +23,7 @@ local CONFIG = {
     -- Avoid importing progress from a new game reusing an older save slot.
     PLAYTIME_GRACE_SECONDS = 5,
     VERBOSE = false,
-    DISPLAY_PROBE_SECONDS = 3, -- only outpost; throttled instance lookup
+    DISPLAY_PROBE_SECONDS = 3, -- outpost UI refresh; cached instance lookup
 }
 
 local TAG = "[GrainRotDepthKeeper] "
@@ -33,6 +34,26 @@ local function valid(object)
     if object == nil then return false end
     local ok, result = pcall(function() return object:IsValid() end)
     return ok and result == true
+end
+
+-- FindFirstOf scans Unreal's object registry. Stable singletons are cached
+-- while their UObject remains valid, and cleared on ClientRestart/map travel.
+-- This avoids thousands of repeated registry searches in a long session.
+local cached = {}
+local function find_cached(className)
+    local object = cached[className]
+    if valid(object) then return object end
+    cached[className] = nil
+    local ok, found = pcall(FindFirstOf, className)
+    if ok and valid(found) then
+        cached[className] = found
+        return found
+    end
+    return nil
+end
+
+local function clear_cache()
+    cached = {}
 end
 
 local function whole(value, lower, upper)
@@ -173,25 +194,16 @@ local function probe_display(raw, runState)
     if now < state.nextDisplayProbe then return end
     state.nextDisplayProbe = now + CONFIG.DISPLAY_PROBE_SECONDS
 
-    local display, machine, elevator
-    pcall(function() display = FindFirstOf("HeldenDungeonLevelDisplay") end)
-    pcall(function() machine = FindFirstOf("HeldenElevatorMachine") end)
-    pcall(function() elevator = FindFirstOf("HeldenDungeonElevator") end)
-    local shown = valid(display) and read_number(display, "DisplayLevel", 0, CONFIG.MAX_DEPTH) or nil
+    local display = find_cached("HeldenDungeonLevelDisplay")
+    local shown = display and read_number(display, "DisplayLevel", 0, CONFIG.MAX_DEPTH) or nil
     if shown and not state.failureSeen and (shown == raw or shown == raw + 1) then
         state.displayOffset = shown - raw
     end
-    local machineName = "none"
-    if valid(machine) then
-        pcall(function() machineName = tostring(machine.TargetDungeonName) end)
-    end
-    local elevatorCurrent
-    if valid(elevator) then
-        elevatorCurrent = read_number(elevator, "CurrentStationIdx", 0, 100)
-    end
-    local snapshot = string.format("outpost: save=%d kept=%d display=%s offset=%s machine=%s station=%s fail=%s",
+    -- Deep elevator diagnostics are disabled on the hot path. In a normal
+    -- session only the one actual display object is inspected.
+    local snapshot = string.format("outpost: save=%d kept=%d display=%s offset=%s fail=%s",
         raw, state.protected, tostring(shown), tostring(state.displayOffset),
-        machineName, tostring(elevatorCurrent), tostring(state.failureSeen))
+        tostring(state.failureSeen))
     if snapshot ~= state.lastDisplaySnapshot then
         state.lastDisplaySnapshot = snapshot
         log(snapshot)
@@ -221,11 +233,11 @@ end
 local function scan()
     -- GameMode exists only on a server/listen host; client-only writes would
     -- not be authoritative and might desync multiplayer sessions.
-    local gm = FindFirstOf("GameModeBase")
-    if not valid(gm) then return end
+    local gm = find_cached("GameModeBase")
+    if not gm then return end
 
-    local gi = FindFirstOf("HeldenGameInstance")
-    if not valid(gi) then return end
+    local gi = find_cached("HeldenGameInstance")
+    if not gi then return end
     local save
     pcall(function() save = gi.CurrentSaveGame end)
     if not valid(save) then
@@ -262,8 +274,8 @@ local function scan()
     local raw = read_number(save, "DungeonLevel", 0, CONFIG.MAX_DEPTH)
     if raw == nil then return end
     local runState, flags, seedLevel
-    local gs = FindFirstOf("HeldenGameState")
-    if valid(gs) then
+    local gs = find_cached("HeldenGameState")
+    if gs then
         pcall(function()
             local run = gs.CurrentDungeonRun
             runState = enum_number(run.State)
@@ -276,6 +288,9 @@ local function scan()
     end
 
     if runState == 1 or runState == 2 then
+        -- The elevator/UI actor may be replaced when travelling. Never retain
+        -- a cached display across a new dungeon instance.
+        cached["HeldenDungeonLevelDisplay"] = nil
         state.runSeen = true
         if state.failureSeen then
             log("next dungeon run started; failure recovery completed")
@@ -365,7 +380,14 @@ end
 
 local hookIsRegistered = false
 local errorCount = 0
+local hookSample = CONFIG.CLOCK_SAMPLE_EVERY - 1 -- first callback runs immediately
 local function heartbeat()
+    -- BlueprintUpdateAnimation may run for hundreds of anim instances each
+    -- second. Lua callbacks still happen, but 7/8 return without os.clock,
+    -- reflection, allocations or any other observable side effect.
+    hookSample = hookSample + 1
+    if hookSample < CONFIG.CLOCK_SAMPLE_EVERY then return end
+    hookSample = 0
     local now = os.clock()
     if state.lastCheck >= 0 and now >= state.lastCheck and
        now - state.lastCheck < CONFIG.POLL_SECONDS then return end
@@ -385,7 +407,7 @@ local function ensure_hook()
     end)
     if ok then
         hookIsRegistered = true
-        log("animation heartbeat registered; host-side depth keeper active")
+        log("animation heartbeat registered; sampled and cached lookups active")
     else
         log("could not register heartbeat hook: " .. tostring(err))
     end
@@ -395,7 +417,9 @@ ensure_hook()
 pcall(function()
     RegisterHook("/Script/Engine.PlayerController:ClientRestart", function()
         state.lastCheck = -1
+        hookSample = CONFIG.CLOCK_SAMPLE_EVERY - 1
+        clear_cache()
         ensure_hook()
     end)
 end)
-log("loaded v0.2.0 (early restoration; outpost display refresh + runtime diagnostics)")
+log("loaded v0.3.0 (8x lighter clock checks; 0.5s poll; UObject lookup cache)")
