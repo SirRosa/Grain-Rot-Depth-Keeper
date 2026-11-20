@@ -1,7 +1,7 @@
 name: Validate and package Grain Rot Depth Keeper
 on:
   push:
-    branches: [main]
+    branches: [main, fps-timer-hotfix]
   pull_request:
   workflow_dispatch:
 
@@ -24,11 +24,11 @@ jobs:
       - name: Package mod
         run: |
           mkdir -p out
-          zip -r out/GrainRotDepthKeeper-v0.3.0.zip ue4ss/Mods/GrainRotDepthKeeper
-          unzip -t out/GrainRotDepthKeeper-v0.3.0.zip
+          zip -r out/GrainRotDepthKeeper-v0.3.1-fps-timer-hotfix.zip ue4ss/Mods/GrainRotDepthKeeper
+          unzip -t out/GrainRotDepthKeeper-v0.3.1-fps-timer-hotfix.zip
       - name: Upload installation ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: GrainRotDepthKeeper-v0.3.0
-          path: out/GrainRotDepthKeeper-v0.3.0.zip
+          name: GrainRotDepthKeeper-v0.3.1-fps-timer-hotfix
+          path: out/GrainRotDepthKeeper-v0.3.1-fps-timer-hotfix.zip
           if-no-files-found: error

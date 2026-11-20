@@ -6,8 +6,10 @@ local function actor(fields)
     return a
 end
 
-local function sandbox()
+local function sandbox(timerMode)
     local now, logs, files, hooks = 0, {}, {}, {}
+    local scheduled, asyncCallback
+
     local counts = {calls = 0, clocks = 0, finds = 0}
     local gm = actor()
     local save = actor({
@@ -50,17 +52,35 @@ local function sandbox()
         print = function(msg) logs[#logs+1] = msg end,
         FindFirstOf = function(name) counts.finds = counts.finds + 1; return objects[name] end,
         RegisterHook = function(name, callback) hooks[name] = callback end,
+        LoopInGameThreadWithDelay = timerMode == "direct" and function(ms, cb)
+            assert(ms == 500)
+            scheduled = cb
+            return 123
+        end or nil,
+        LoopAsync = timerMode == "async" and function(ms, cb)
+            assert(ms == 500)
+            asyncCallback = cb
+        end or nil,
+        ExecuteInGameThread = timerMode == "async" and function(cb) cb() end or nil,
     }, {__index = _G})
     assert(loadfile(main, "t", env))()
     local anim = "/Game/Animation/ABP_HeldenPlayer.ABP_HeldenPlayer_C:BlueprintUpdateAnimation"
-    assert(hooks[anim], "heartbeat hook missing")
+    if timerMode then
+        assert(not hooks[anim], "animation hook must not be installed with timer")
+        assert(timerMode == "direct" and scheduled or
+               timerMode == "async" and asyncCallback, "timer missing")
+    else
+        assert(hooks[anim], "fallback heartbeat hook missing")
+    end
     return {
         save = save, game = gs, instance = gi, dungeon = dungeon,
         display = display, machine = machine, elevator = elevator,
         objects = objects, logs = logs, files = files,
         tick = function(dt)
             now = now + (dt or 0.6)
-            for _ = 1, 8 do counts.calls = counts.calls + 1; hooks[anim]() end
+            if scheduled then scheduled()
+            elseif asyncCallback then assert(asyncCallback() == false)
+            else for _ = 1, 8 do counts.calls = counts.calls + 1; hooks[anim]() end end
         end,
         spam = function(hookCalls, elapsed)
             now = now + (elapsed or 0)
@@ -237,6 +257,29 @@ test("game can reset depth again after end screen and keeper re-restores it", fu
     t.save.DungeonLevel = 0
     t.tick()
     assert(t.save.DungeonLevel == 4)
+end)
+
+test("direct game-thread timer polls without any animation hooks", function()
+    local t = sandbox("direct")
+    t.game.CurrentDungeonRun.State = 2
+    t.save.DungeonLevel = 7
+    t.dungeon.CurrentSeed.Level = 6
+    t.tick()
+    assert(t.save.DungeonLevel == 7)
+    assert(t.metrics().calls == 0)
+    t.restart()
+    t.tick()
+    assert(t.save.DungeonLevel == 7)
+end)
+
+test("UE4SS v3 async timer polls without any animation hooks", function()
+    local t = sandbox("async")
+    t.game.CurrentDungeonRun.State = 2
+    t.save.DungeonLevel = 9
+    t.dungeon.CurrentSeed.Level = 8
+    t.tick()
+    assert(t.save.DungeonLevel == 9)
+    assert(t.metrics().calls == 0)
 end)
 
 test("animation storm: clock sampled once per eight callbacks and cached lookups", function()

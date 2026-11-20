@@ -378,13 +378,22 @@ local function scan()
     end
 end
 
+-- Prefer a fixed-rate game-thread timer. A BlueprintUpdateAnimation hook invokes
+-- Lua for *every animation update*, even when our callback returns early.
+-- UE4SS v3 provides LoopAsync + ExecuteInGameThread; newer builds provide a
+-- direct game-thread delayed loop. Animation is only a compatibility fallback.
 local hookIsRegistered = false
 local errorCount = 0
-local hookSample = CONFIG.CLOCK_SAMPLE_EVERY - 1 -- first callback runs immediately
+local hookSample = CONFIG.CLOCK_SAMPLE_EVERY - 1
+local function safe_scan()
+    local ok, err = pcall(scan)
+    if not ok and errorCount < 8 then
+        errorCount = errorCount + 1
+        log("poll error (" .. errorCount .. "/8): " .. tostring(err))
+    end
+end
+
 local function heartbeat()
-    -- BlueprintUpdateAnimation may run for hundreds of anim instances each
-    -- second. Lua callbacks still happen, but 7/8 return without os.clock,
-    -- reflection, allocations or any other observable side effect.
     hookSample = hookSample + 1
     if hookSample < CONFIG.CLOCK_SAMPLE_EVERY then return end
     hookSample = 0
@@ -392,11 +401,7 @@ local function heartbeat()
     if state.lastCheck >= 0 and now >= state.lastCheck and
        now - state.lastCheck < CONFIG.POLL_SECONDS then return end
     state.lastCheck = now
-    local ok, err = pcall(scan)
-    if not ok and errorCount < 8 then
-        errorCount = errorCount + 1
-        log("poll error (" .. errorCount .. "/8): " .. tostring(err))
-    end
+    safe_scan()
 end
 
 local function ensure_hook()
@@ -407,19 +412,45 @@ local function ensure_hook()
     end)
     if ok then
         hookIsRegistered = true
-        log("animation heartbeat registered; sampled and cached lookups active")
+        log("WARNING: animation heartbeat fallback active (high-frequency UE4SS hook)")
     else
         log("could not register heartbeat hook: " .. tostring(err))
     end
 end
 
-ensure_hook()
+local scheduled = false
+if type(LoopInGameThreadWithDelay) == "function" then
+    local ok, handle = pcall(LoopInGameThreadWithDelay, 500, safe_scan)
+    if ok and handle ~= nil then
+        scheduled = true
+        log("game-thread timer active (500 ms); no animation hook")
+    end
+end
+if not scheduled and type(LoopAsync) == "function" and
+   type(ExecuteInGameThread) == "function" then
+    local ok, err = pcall(LoopAsync, 500, function()
+        local queued, why = pcall(ExecuteInGameThread, safe_scan)
+        if not queued and errorCount < 8 then
+            errorCount = errorCount + 1
+            log("game-thread queue failed: " .. tostring(why))
+        end
+        return false
+    end)
+    if ok then
+        scheduled = true
+        log("UE4SS v3 async timer active (500 ms); no animation hook")
+    else
+        log("async timer unavailable: " .. tostring(err))
+    end
+end
+if not scheduled then ensure_hook() end
+
 pcall(function()
     RegisterHook("/Script/Engine.PlayerController:ClientRestart", function()
         state.lastCheck = -1
         hookSample = CONFIG.CLOCK_SAMPLE_EVERY - 1
         clear_cache()
-        ensure_hook()
     end)
 end)
-log("loaded v0.3.0 (8x lighter clock checks; 0.5s poll; UObject lookup cache)")
+log("loaded v0.3.1 fps-timer-hotfix (" ..
+    (scheduled and "timer" or "animation fallback") .. ")")
